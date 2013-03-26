@@ -6,6 +6,7 @@ from django.conf import settings
 from django.conf.urls.defaults import patterns, url
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned, ValidationError
 from django.core.urlresolvers import NoReverseMatch, reverse, resolve, Resolver404, get_script_prefix
+from django.core.signals import got_request_exception
 from django.db import transaction
 from django.db.models.sql.constants import QUERY_TERMS
 from django.http import HttpResponse, HttpResponseNotFound, Http404
@@ -276,7 +277,8 @@ class Resource(object):
 
         if not response_code == 404 or send_broken_links:
             log = logging.getLogger('django.request.tastypie')
-            log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': response_code, 'request':request})
+            log.error('Internal Server Error: %s' % request.path, exc_info=True,
+                      extra={'status_code': response_code, 'request': request})
 
             if django.VERSION < (1, 3, 0):
                 from django.core.mail import mail_admins
@@ -288,6 +290,9 @@ class Resource(object):
 
                 message = "%s\n\n%s" % (the_trace, request_repr)
                 mail_admins(subject, message, fail_silently=True)
+
+        # Send the signal so other apps are aware of the exception.
+        got_request_exception.send(self.__class__, request=request)
 
         # Prep the data going out.
         data = {
@@ -601,6 +606,8 @@ class Resource(object):
         """
         try:
             auth_result = self._meta.authorization.read_detail(object_list, bundle)
+            if not auth_result is True:
+                raise Unauthorized()
         except Unauthorized, e:
             self.unauthorized_result(e)
 
@@ -625,6 +632,8 @@ class Resource(object):
         """
         try:
             auth_result = self._meta.authorization.create_detail(object_list, bundle)
+            if not auth_result is True:
+                raise Unauthorized()
         except Unauthorized, e:
             self.unauthorized_result(e)
 
@@ -649,6 +658,8 @@ class Resource(object):
         """
         try:
             auth_result = self._meta.authorization.update_detail(object_list, bundle)
+            if not auth_result is True:
+                raise Unauthorized()
         except Unauthorized, e:
             self.unauthorized_result(e)
 
@@ -673,6 +684,8 @@ class Resource(object):
         """
         try:
             auth_result = self._meta.authorization.delete_detail(object_list, bundle)
+            if not auth_result:
+                raise Unauthorized()
         except Unauthorized, e:
             self.unauthorized_result(e)
 
@@ -1274,7 +1287,7 @@ class Resource(object):
 
         for obj in to_be_serialized[self._meta.collection_name]:
             bundle = self.build_bundle(obj=obj, request=request)
-            bundles.append(self.full_dehydrate(bundle))
+            bundles.append(self.full_dehydrate(bundle, for_list=True))
 
         to_be_serialized[self._meta.collection_name] = bundles
         to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
@@ -1377,7 +1390,7 @@ class Resource(object):
             return http.HttpNoContent()
         else:
             to_be_serialized = {}
-            to_be_serialized[self._meta.collection_name] = [self.full_dehydrate(bundle) for bundle in bundles_seen]
+            to_be_serialized[self._meta.collection_name] = [self.full_dehydrate(bundle, for_list=True) for bundle in bundles_seen]
             to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
             return self.create_response(request, to_be_serialized, response_class=http.HttpAccepted)
 
@@ -1532,7 +1545,7 @@ class Resource(object):
 
                     # The object does exist, so this is an update-in-place.
                     bundle = self.build_bundle(obj=obj, request=request)
-                    bundle = self.full_dehydrate(bundle)
+                    bundle = self.full_dehydrate(bundle, for_list=True)
                     bundle = self.alter_detail_data_to_serialize(request, bundle)
                     self.update_in_place(request, bundle, data)
                 except (ObjectDoesNotExist, MultipleObjectsReturned):
@@ -1565,7 +1578,7 @@ class Resource(object):
             return http.HttpAccepted()
         else:
             to_be_serialized = {}
-            to_be_serialized['objects'] = [self.full_dehydrate(bundle) for bundle in bundles_seen]
+            to_be_serialized['objects'] = [self.full_dehydrate(bundle, for_list=True) for bundle in bundles_seen]
             to_be_serialized = self.alter_list_data_to_serialize(request, to_be_serialized)
             return self.create_response(request, to_be_serialized, response_class=http.HttpAccepted)
 
@@ -1667,7 +1680,7 @@ class Resource(object):
             try:
                 obj = self.obj_get(bundle=base_bundle, **{self._meta.detail_uri_name: identifier})
                 bundle = self.build_bundle(obj=obj, request=request)
-                bundle = self.full_dehydrate(bundle)
+                bundle = self.full_dehydrate(bundle, for_list=True)
                 objects.append(bundle)
             except (ObjectDoesNotExist, Unauthorized):
                 not_found.append(identifier)
